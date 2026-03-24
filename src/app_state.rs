@@ -918,4 +918,22 @@ impl AppState {
             self.touchpad_active_button = None;
         }
     }
+
+    pub fn has_unsaved_changes(&self) -> bool {
+        if let Some(idx) = self.config_selected {
+            if idx < self.configs.len() {
+                let path = format!("{}/{}", self.configs_dir, self.configs[idx].0);
+
+                let file_content = std::fs::read_to_string(&path).unwrap_or_default();
+
+                let saved_buttons: Vec<VirtualButton> = serde_json::from_str(&file_content).unwrap_or_default();
+
+                let current_json = serde_json::to_string(&self.buttons).unwrap_or_default();
+                let saved_json = serde_json::to_string(&saved_buttons).unwrap_or_default();
+
+                return current_json != saved_json;
+            }
+        }
+        false
+    }
 }

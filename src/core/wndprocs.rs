@@ -1696,6 +1696,17 @@ pub unsafe extern "system" fn edit_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        WM_CLOSE => {
+            let sidebar_handle = GetPropW(window, w!("SidebarHwnd"));
+            if !sidebar_handle.is_invalid() {
+                let sidebar_hwnd = HWND(sidebar_handle.0 as *mut _);
+                if IsWindow(sidebar_hwnd).as_bool() {
+                    SendMessageW(sidebar_hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                    return LRESULT(0);
+                }
+            }
+            return DefWindowProcW(window, message, wparam, lparam);
+        }
         WM_MOUSEACTIVATE => {
             ensure_mouse_hook();
             return LRESULT(MA_NOACTIVATE as isize);
@@ -1909,17 +1920,17 @@ pub unsafe extern "system" fn sidebar_wndproc(window: HWND, message: u32, wparam
         WM_COMMAND => {
             let ctrl_id = (wparam.0 & 0xFFFF) as i32;
             let edit_hwnd = HWND(GetWindowLongPtrW(window, GWLP_USERDATA) as *mut _);
+
+            if ctrl_id == 5003 {
+                let _ = PostMessageW(window, WM_CLOSE, WPARAM(0), LPARAM(0));
+                return LRESULT(0);
+            }
+
             APP_STATE.with(|s| {
                 if let Ok(mut state) = s.try_borrow_mut() {
-                    let redraw = false;
                     if ctrl_id == 5002 {
                         state.save_to_selected();
                         MessageBoxW(window, w!("配置已保存"), w!("提示"), MB_OK | MB_ICONINFORMATION);
-                    } else if ctrl_id == 5003 {
-                        SendMessageW(window, WM_CLOSE, WPARAM(0), LPARAM(0));
-                    }
-                    if redraw && IsWindow(edit_hwnd).as_bool() {
-                        crate::ui::render::force_redraw(edit_hwnd, &mut state);
                     }
                 }
             });
@@ -1977,13 +1988,50 @@ pub unsafe extern "system" fn sidebar_wndproc(window: HWND, message: u32, wparam
         }
         WM_CLOSE => {
             let edit_hwnd = HWND(GetWindowLongPtrW(window, GWLP_USERDATA) as *mut _);
+
+            let mut should_close = true;
+            let mut should_save = false;
+            let mut should_revert = false;
+
             APP_STATE.with(|s| {
-                if let Ok(mut s) = s.try_borrow_mut() {
-                    s.save_to_selected();
-                    s.mode = ProgramMode::Menu;
+                if let Ok(state) = s.try_borrow() {
+                    if state.has_unsaved_changes() {
+                        let res = MessageBoxW(
+                            window,
+                            w!("当前按键配置已被修改，是否保存更改？\n\n选择“是”保存，选择“否”放弃更改。"),
+                            w!("保存确认"),
+                            MB_YESNOCANCEL | MB_ICONQUESTION
+                        );
+
+                        if res == IDYES {
+                            should_save = true;
+                        } else if res == IDNO {
+                            should_revert = true;
+                        } else {
+                            should_close = false;
+                        }
+                    }
+                }
+            });
+
+            if !should_close {
+                return LRESULT(0);
+            }
+
+            APP_STATE.with(|s| {
+                if let Ok(mut state) = s.try_borrow_mut() {
+                    if should_save {
+                        state.save_to_selected();
+                    } else if should_revert {
+                        if let Some(idx) = state.config_selected {
+                            state.load_config_by_index(idx);
+                        }
+                    }
+                    state.mode = ProgramMode::Menu;
                     crate::ui::CURRENT_MODE.store(0, std::sync::atomic::Ordering::SeqCst);
                 }
             });
+
             if IsWindow(edit_hwnd).as_bool() {
                 let main_hwnd = HWND(GetWindowLongPtrW(edit_hwnd, GWLP_USERDATA) as *mut _);
                 if IsWindow(main_hwnd).as_bool() { ShowWindow(main_hwnd, SW_SHOW); }
