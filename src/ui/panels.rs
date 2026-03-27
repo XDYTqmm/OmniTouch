@@ -410,7 +410,7 @@ pub unsafe fn create_config_window(instance: HMODULE) -> Result<()> {
     let y = (screen_h - h) / 2;
 
     let config_hwnd = CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
+        WS_EX_TOPMOST,
         w!("OmniTouch-ChildWindow"),
         w!("配置管理"),
         // 配置窗口使用固定对话框样式，避免布局被自由拉伸破坏。
@@ -529,7 +529,7 @@ pub unsafe fn create_child_window(instance: HMODULE, title: PCWSTR) -> Result<()
     let y = (screen_h - h) / 2;
 
     let child_hwnd = CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
+        WS_EX_TOPMOST,
         w!("OmniTouch-ChildWindow"),
         title,                  // 窗口标题
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,

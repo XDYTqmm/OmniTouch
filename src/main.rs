@@ -84,7 +84,7 @@ fn main() -> Result<()> {
         let y = (screen_h - h) / 2;
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            WS_EX_TOPMOST,
             w!("OmniTouch-MainWindow"),
             w!("OmniTouch - 全域触控"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
