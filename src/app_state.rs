@@ -913,6 +913,7 @@ impl AppState {
             if self.use_virtual_gamepad {
                 crate::input::vigem_wrapper::sync_gamepad(&self.buttons);
             }
+            crate::core::event_handler::close_all_osk(self);
             self.active_touches.clear();
             self.dragging_button_index = None;
             self.touchpad_active_button = None;

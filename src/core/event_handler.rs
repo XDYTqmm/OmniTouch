@@ -3,6 +3,7 @@
 use crate::app_state::*;
 use crate::input::handler::*;
 use crate::w;
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{PtInRect, InvalidateRect};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -10,11 +11,85 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::app_state::TouchRecord;
 
+const TOUCH_OSK_DRAG_SENTINEL: usize = 9999;
+const TOUCH_OSK_KEY_SENTINEL_BASE: usize = 10000;
+
+fn system_osk_target() -> String {
+    let windir = std::env::var("windir").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let sysnative = format!("{}\\sysnative\\osk.exe", windir);
+    if std::path::Path::new(&sysnative).exists() {
+        sysnative
+    } else {
+        format!("{}\\System32\\osk.exe", windir)
+    }
+}
+
+pub unsafe fn is_system_osk_open() -> bool {
+    FindWindowW(w!("OSKMainClass"), PCWSTR::null())
+        .map(|hwnd| IsWindow(hwnd).as_bool())
+        .unwrap_or(false)
+}
+
+pub unsafe fn open_system_osk() {
+    let target = system_osk_target();
+    let mut wide_target: Vec<u16> = target.encode_utf16().collect();
+    wide_target.push(0);
+    let _ = ShellExecuteW(None, w!("open"), PCWSTR(wide_target.as_ptr()), None, None, SW_SHOW);
+}
+
+pub unsafe fn close_system_osk() {
+    if let Ok(osk_hwnd) = FindWindowW(w!("OSKMainClass"), PCWSTR::null()) {
+        if IsWindow(osk_hwnd).as_bool() {
+            let _ = PostMessageW(osk_hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+pub unsafe fn close_virtual_osk(state: &mut AppState) {
+    state.osk_visible = false;
+    state.is_dragging_osk = false;
+    state.osk_target_text = None;
+    for btn in &mut state.osk_buttons {
+        if btn.is_pressed {
+            let focus_hwnd = GetFocus();
+            if !focus_hwnd.is_invalid() {
+                let scan = MapVirtualKeyW(btn.key_code as u32, MAPVK_VK_TO_VSC);
+                let _ = PostMessageW(
+                    focus_hwnd,
+                    WM_KEYUP,
+                    WPARAM(btn.key_code as usize),
+                    LPARAM((1 | (scan << 16) | (1 << 30) | (1 << 31)) as isize),
+                );
+            } else {
+                simulate_key(VIRTUAL_KEY(btn.key_code), false);
+            }
+        }
+        btn.is_pressed = false;
+    }
+}
+
+pub unsafe fn close_all_osk(state: &mut AppState) {
+    close_virtual_osk(state);
+    close_system_osk();
+}
+
+pub unsafe fn toggle_osk(state: &mut AppState) {
+    if state.use_system_osk {
+        if is_system_osk_open() {
+            close_system_osk();
+        } else {
+            open_system_osk();
+        }
+    } else if state.osk_visible {
+        close_virtual_osk(state);
+    } else {
+        state.osk_visible = true;
+    }
+}
+
 /// 关闭悬浮键盘，并将焦点切回其父窗口。
 unsafe fn close_osk_and_defocus(state: &mut AppState) {
-    state.osk_visible = false;
-    // 清空悬浮键盘的按下态，避免下次打开时残留。
-    for b in &mut state.osk_buttons { b.is_pressed = false; }
+    close_virtual_osk(state);
     
     let focus_hwnd = GetFocus();
     if !focus_hwnd.is_invalid() {
@@ -98,6 +173,7 @@ pub unsafe fn on_lbutton_down(state: &mut AppState, hwnd: HWND, pt: POINT, _is_d
             return;
         } else {
             close_osk_and_defocus(state);
+            return;
         }
     }
 
@@ -219,21 +295,14 @@ pub unsafe fn on_lbutton_up(state: &mut AppState) {
     }
 
     if state.mode == ProgramMode::Running || state.mode == ProgramMode::Menu {
+        let mut should_toggle_osk = false;
         for btn in state.buttons.iter_mut() {
             if btn.group == 5 || btn.variant == ButtonVariant::OSKToggle {
                 if btn.is_pressed {
                     btn.is_pressed = false;
                     // 仅在确认是点击而非拖拽后，才执行自由按键或键盘开关逻辑。
                     if btn.variant == ButtonVariant::OSKToggle {
-                        if state.use_system_osk {
-                            let windir = std::env::var("windir").unwrap_or_else(|_| "C:\\Windows".to_string());
-                            let target = format!("{}\\sysnative\\osk.exe", windir);
-                            let target = if std::path::Path::new(&target).exists() { target } else { format!("{}\\System32\\osk.exe", windir) };
-                            let mut wide_target: Vec<u16> = target.encode_utf16().collect(); wide_target.push(0);
-                            let _ = ShellExecuteW(None, w!("open"), windows::core::PCWSTR(wide_target.as_ptr()), None, None, SW_SHOW);
-                        } else {
-                            state.osk_visible = !state.osk_visible;
-                        }
+                        should_toggle_osk = true;
                     } else {
                         // 自由按键在抬起时触发一次短促点击。
                         let key_code = btn.key_code;
@@ -254,6 +323,9 @@ pub unsafe fn on_lbutton_up(state: &mut AppState) {
             } else if btn.variant == ButtonVariant::Joystick || btn.variant == ButtonVariant::Trigger { 
                 btn.is_pressed = false; 
             }
+        }
+        if should_toggle_osk {
+            toggle_osk(state);
         }
         state.dragging_button_index = None; state.touchpad_active_button = None;
         
@@ -385,7 +457,7 @@ pub unsafe fn on_pointer_down(state: &mut AppState, pointer_id: u32, pt: POINT) 
         if PtInRect(&title_rect, pt).as_bool() {
             state.is_dragging_osk = true;
             state.osk_drag_offset = POINT { x: pt.x - state.osk_rect.left, y: pt.y - state.osk_rect.top };
-            state.active_touches.insert(pointer_id, TouchRecord { btn_idx: 9999, last_pos: pt, start_pos: pt, drag_offset: POINT::default() });
+            state.active_touches.insert(pointer_id, TouchRecord { btn_idx: TOUCH_OSK_DRAG_SENTINEL, last_pos: pt, start_pos: pt, drag_offset: POINT::default() });
             return;
         }
 
@@ -397,7 +469,7 @@ pub unsafe fn on_pointer_down(state: &mut AppState, pointer_id: u32, pt: POINT) 
                     if !focus_hwnd.is_invalid() {
                         let scan = MapVirtualKeyW(btn.key_code as u32, MAPVK_VK_TO_VSC); let _ = PostMessageW(focus_hwnd, WM_KEYDOWN, WPARAM(btn.key_code as usize), LPARAM((1 | (scan << 16)) as isize));
                     } else { simulate_key(VIRTUAL_KEY(btn.key_code), true); }
-                    state.active_touches.insert(pointer_id, TouchRecord { btn_idx: 10000 + btn.key_code as usize, last_pos: pt, start_pos: pt, drag_offset: POINT::default() });
+                    state.active_touches.insert(pointer_id, TouchRecord { btn_idx: TOUCH_OSK_KEY_SENTINEL_BASE + btn.key_code as usize, last_pos: pt, start_pos: pt, drag_offset: POINT::default() });
                     
                     if btn.key_code == VK_RETURN.0 {
                         close_osk_and_defocus(state);
@@ -408,6 +480,7 @@ pub unsafe fn on_pointer_down(state: &mut AppState, pointer_id: u32, pt: POINT) 
             return;
         } else {
             close_osk_and_defocus(state);
+            return;
         }
     }
 
@@ -451,13 +524,13 @@ pub unsafe fn on_pointer_update(state: &mut AppState, pointer_id: u32, pt: POINT
     let mut need_redraw = false;
 
     if let Some(mut touch) = state.active_touches.get_mut(&pointer_id).copied() {
-        if touch.btn_idx == 9999 {
+        if touch.btn_idx == TOUCH_OSK_DRAG_SENTINEL {
             if state.is_dragging_osk {
                 let (w, h) = (state.osk_rect.right - state.osk_rect.left, state.osk_rect.bottom - state.osk_rect.top);
                 state.osk_rect.left = pt.x - state.osk_drag_offset.x; state.osk_rect.top = pt.y - state.osk_drag_offset.y; 
                 state.osk_rect.right = state.osk_rect.left + w; state.osk_rect.bottom = state.osk_rect.top + h; need_redraw = true;
             }
-        } else if touch.btn_idx < 10000 {
+        } else if touch.btn_idx < TOUCH_OSK_KEY_SENTINEL_BASE {
             let idx = touch.btn_idx;
             
             if state.buttons[idx].group == 5 {
@@ -523,10 +596,10 @@ pub unsafe fn on_pointer_update(state: &mut AppState, pointer_id: u32, pt: POINT
 /// 处理触控抬起时的释放、点击确认和同步收尾。
 pub unsafe fn on_pointer_up(state: &mut AppState, pointer_id: u32) {
     if let Some(touch) = state.active_touches.remove(&pointer_id) {
-        if touch.btn_idx == 9999 {
+        if touch.btn_idx == TOUCH_OSK_DRAG_SENTINEL {
             state.is_dragging_osk = false;
-        } else if touch.btn_idx >= 10000 {
-            let key_code = (touch.btn_idx - 10000) as u16;
+        } else if touch.btn_idx >= TOUCH_OSK_KEY_SENTINEL_BASE {
+            let key_code = (touch.btn_idx - TOUCH_OSK_KEY_SENTINEL_BASE) as u16;
             for btn in &mut state.osk_buttons {
                 if btn.key_code == key_code {
                     btn.is_pressed = false; 
@@ -539,6 +612,7 @@ pub unsafe fn on_pointer_up(state: &mut AppState, pointer_id: u32) {
             }
         } else {
             let idx = touch.btn_idx;
+            let mut should_toggle_osk = false;
             let btn = &mut state.buttons[idx];
 
             if btn.group == 5 || btn.variant == ButtonVariant::OSKToggle {
@@ -546,15 +620,7 @@ pub unsafe fn on_pointer_up(state: &mut AppState, pointer_id: u32) {
                     btn.is_pressed = false;
                     // 仅在确认是点击而非拖拽后，才执行自由按键或键盘开关逻辑。
                     if btn.variant == ButtonVariant::OSKToggle {
-                        if state.use_system_osk {
-                            let windir = std::env::var("windir").unwrap_or_else(|_| "C:\\Windows".to_string());
-                            let target = format!("{}\\sysnative\\osk.exe", windir);
-                            let target = if std::path::Path::new(&target).exists() { target } else { format!("{}\\System32\\osk.exe", windir) };
-                            let mut wide_target: Vec<u16> = target.encode_utf16().collect(); wide_target.push(0);
-                            let _ = ShellExecuteW(None, w!("open"), windows::core::PCWSTR(wide_target.as_ptr()), None, None, SW_SHOW);
-                        } else {
-                            state.osk_visible = !state.osk_visible;
-                        }
+                        should_toggle_osk = true;
                     } else {
                         // 自由按键在抬起时触发一次短促点击。
                         let key_code = btn.key_code;
@@ -577,6 +643,9 @@ pub unsafe fn on_pointer_up(state: &mut AppState, pointer_id: u32) {
             
             if btn.group == 6 && state.touchpad_active_button == Some(idx) {
                 state.touchpad_active_button = None;
+            }
+            if should_toggle_osk {
+                toggle_osk(state);
             }
 
             if state.use_virtual_gamepad {

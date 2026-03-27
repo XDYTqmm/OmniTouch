@@ -404,8 +404,8 @@ pub unsafe fn create_config_window(instance: HMODULE) -> Result<()> {
     // 步骤 4: 创建配置窗口 (调整尺寸并禁用缩放)
     let screen_w = GetSystemMetrics(SM_CXSCREEN);
     let screen_h = GetSystemMetrics(SM_CYSCREEN);
-    let w = 460;  // 稍微加宽，提供更好的呼吸感
-    let h = 420;  // 稍微加高
+    let w = 460;
+    let h = 470;
     let x = (screen_w - w) / 2;
     let y = (screen_h - h) / 2;
 
@@ -684,6 +684,7 @@ pub unsafe fn enter_edit_mode(
         0, 0, screen_w, screen_h,
         None, None, instance, None,
     ).unwrap();
+    let _ = SetWindowPos(edit_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     SetWindowLongPtrW(edit_hwnd, GWLP_USERDATA, main_hwnd.0 as isize);
 
     let sidebar_class = w!("OmniTouch-Sidebar");
@@ -708,6 +709,7 @@ pub unsafe fn enter_edit_mode(
         WS_OVERLAPPEDWINDOW, x, y, w, h,
         None, None, instance, None,
     ).unwrap();
+    let _ = SetWindowPos(sidebar_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
     SetWindowLongPtrW(sidebar_hwnd, GWLP_USERDATA, edit_hwnd.0 as isize);
     SetPropW(edit_hwnd, w!("SidebarHwnd"), HANDLE(sidebar_hwnd.0 as _));
@@ -740,6 +742,7 @@ pub unsafe fn enter_edit_mode(
 
     crate::core::wndprocs::APP_STATE.with(|s| {
         if let Ok(mut state) = s.try_borrow_mut() {
+            crate::core::event_handler::close_all_osk(&mut state);
             crate::ui::sync_sidebar_list(tree_hwnd, &mut state);
         }
     });
@@ -1076,6 +1079,7 @@ unsafe extern "system" fn property_wndproc(window: HWND, message: u32, wparam: W
                 si.nPos = new_pos;
                 let _ = SetScrollInfo(window, SB_VERT, &si, TRUE);
                 let _ = SetPropW(window, w!("ScrollPos"), HANDLE(new_pos as isize as *mut _));
+                let _ = RedrawWindow(window, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             }
             return LRESULT(0);
         }
@@ -1098,13 +1102,16 @@ unsafe extern "system" fn property_wndproc(window: HWND, message: u32, wparam: W
                 2 => new_pos -= si.nPage as i32,
                 3 => new_pos += si.nPage as i32,
                 4 | 5 => {
-                    let mut si_track = SCROLLINFO {
-                        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-                        fMask: SIF_TRACKPOS,
-                        ..Default::default()
-                    };
-                    let _ = GetScrollInfo(window, SB_VERT, &mut si_track);
-                    new_pos = si_track.nTrackPos;
+                    new_pos = ((wparam.0 >> 16) & 0xFFFF) as i32;
+                    if new_pos == 0 {
+                        let mut si_track = SCROLLINFO {
+                            cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+                            fMask: SIF_TRACKPOS,
+                            ..Default::default()
+                        };
+                        let _ = GetScrollInfo(window, SB_VERT, &mut si_track);
+                        new_pos = si_track.nTrackPos;
+                    }
                 }
                 6 => new_pos = si.nMin,
                 7 => new_pos = si.nMax,
@@ -1122,6 +1129,7 @@ unsafe extern "system" fn property_wndproc(window: HWND, message: u32, wparam: W
                 si.nPos = new_pos;
                 let _ = SetScrollInfo(window, SB_VERT, &si, TRUE);
                 let _ = SetPropW(window, w!("ScrollPos"), HANDLE(new_pos as isize as *mut _));
+                let _ = RedrawWindow(window, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             }
             return LRESULT(0);
         }

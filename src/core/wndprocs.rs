@@ -74,6 +74,126 @@ thread_local! {
     static MOUSE_HOOK: RefCell<HHOOK> = RefCell::new(HHOOK::default());
 }
 
+const TOUCH_MOUSE_SIGNATURE: usize = 0xFF51_5700;
+const TOUCH_MOUSE_SIGNATURE_MASK: usize = 0xFFFF_FF00;
+
+fn is_synthetic_touch_mouse_message() -> bool {
+    unsafe {
+        let extra = GetMessageExtraInfo().0 as usize;
+        (extra & TOUCH_MOUSE_SIGNATURE_MASK) == TOUCH_MOUSE_SIGNATURE
+    }
+}
+
+fn is_injected_mouse_message() -> bool {
+    unsafe { GetMessageExtraInfo().0 as usize == crate::input::handler::INJECTED_INPUT_SIGNATURE }
+}
+
+unsafe fn keep_window_topmost(hwnd: HWND) {
+    if IsWindow(hwnd).as_bool() {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        );
+    }
+}
+
+unsafe fn scroll_settings_surface(hwnd: HWND, delta_y: i32) -> bool {
+    let h_settings = GetDlgItem(hwnd, IDC_SETTINGS_BACK).unwrap_or_default();
+    let h_about = GetDlgItem(hwnd, IDC_ABOUT_BACK).unwrap_or_default();
+
+    let is_settings = !h_settings.is_invalid() && IsWindowVisible(h_settings).as_bool();
+    let is_about = !h_about.is_invalid() && IsWindowVisible(h_about).as_bool();
+    if !is_settings && !is_about {
+        return false;
+    }
+
+    let current_scroll = GetPropW(hwnd, w!("SettingsScrollY")).0 as i32;
+    let mut rect = RECT::default();
+    let _ = GetClientRect(hwnd, &mut rect);
+    let window_h = rect.bottom - rect.top;
+    let content_h = if is_about { 330 } else { 410 };
+    let max_scroll = (content_h - window_h).max(0);
+    let new_scroll = (current_scroll - delta_y).clamp(0, max_scroll);
+
+    if new_scroll != current_scroll {
+        let _ = SetPropW(hwnd, w!("SettingsScrollY"), HANDLE(new_scroll as isize as *mut _));
+        SendMessageW(hwnd, WM_SIZE, WPARAM(0), LPARAM(0));
+    }
+    true
+}
+
+unsafe extern "system" fn settings_touch_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _ref_data: usize,
+) -> LRESULT {
+    const WM_POINTERDOWN: u32 = 0x0246;
+    const WM_POINTERUP: u32 = 0x0247;
+    const WM_POINTERUPDATE: u32 = 0x0245;
+    const DRAG_THRESHOLD: i32 = 8;
+
+    match msg {
+        WM_POINTERDOWN => {
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let _ = SetPropW(hwnd, w!("TouchPanStartY"), HANDLE(y as isize as *mut _));
+            let _ = SetPropW(hwnd, w!("TouchPanLastY"), HANDLE(y as isize as *mut _));
+            let _ = SetPropW(hwnd, w!("TouchPanDragging"), HANDLE(0 as _));
+            let _ = SetCapture(hwnd);
+        }
+        WM_POINTERUPDATE => {
+            if GetCapture() == hwnd {
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let start_y = GetPropW(hwnd, w!("TouchPanStartY")).0 as i32;
+                let last_y = GetPropW(hwnd, w!("TouchPanLastY")).0 as i32;
+                let mut dragging = GetPropW(hwnd, w!("TouchPanDragging")).0 as isize != 0;
+
+                if !dragging && (y - start_y).abs() >= DRAG_THRESHOLD {
+                    dragging = true;
+                    let _ = SetPropW(hwnd, w!("TouchPanDragging"), HANDLE(1 as _));
+                }
+
+                if dragging {
+                    let parent = GetParent(hwnd).unwrap_or_default();
+                    if !parent.is_invalid() {
+                        let _ = scroll_settings_surface(parent, y - last_y);
+                    }
+                    let _ = SetPropW(hwnd, w!("TouchPanLastY"), HANDLE(y as isize as *mut _));
+                    return LRESULT(0);
+                }
+            }
+        }
+        WM_POINTERUP => {
+            let dragging = GetPropW(hwnd, w!("TouchPanDragging")).0 as isize != 0;
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let _ = RemovePropW(hwnd, w!("TouchPanStartY"));
+            let _ = RemovePropW(hwnd, w!("TouchPanLastY"));
+            let _ = RemovePropW(hwnd, w!("TouchPanDragging"));
+            if dragging {
+                return LRESULT(0);
+            }
+        }
+        WM_NCDESTROY => {
+            let _ = RemoveWindowSubclass(hwnd, Some(settings_touch_subclass_proc), 0x5354);
+        }
+        _ => {}
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+unsafe fn enable_settings_touch_pan(hwnd: HWND) {
+    let _ = SetWindowSubclass(hwnd, Some(settings_touch_subclass_proc), 0x5354, 0);
+}
+
 /// 确保当前线程已安装用于悬浮键盘的低级鼠标钩子。
 fn ensure_mouse_hook() {
     MOUSE_HOOK.with(|h| {
@@ -539,6 +659,7 @@ pub unsafe extern "system" fn main_wndproc(
                                 if let Ok(overlay_hwnd) = FindWindowW(w!("OmniTouch-OverlayWindow"), w!("OmniTouch Overlay")) {
                                     if IsWindow(overlay_hwnd).as_bool() {
                                         let _ = ShowWindow(overlay_hwnd, SW_SHOWNOACTIVATE);
+                                        keep_window_topmost(overlay_hwnd);
                                         SetTimer(overlay_hwnd, 100, 16, None);
                                         
                                         APP_STATE.with(|s| {
@@ -570,6 +691,7 @@ pub unsafe extern "system" fn main_wndproc(
                                 }
                                 APP_STATE.with(|s| {
                                     if let Ok(mut state) = s.try_borrow_mut() {
+                                        state.emergency_release_all_keys();
                                         state.mode = ProgramMode::Menu;
                                     }
                                 });
@@ -596,18 +718,19 @@ pub unsafe extern "system" fn main_wndproc(
                                     crate::ui::CURRENT_MODE.store(0, Ordering::SeqCst);
                                     let _ = create_menu_buttons(hwnd, instance);
                                     let _ = InvalidateRect(hwnd, None, TRUE);
-                                    if let Ok(overlay_hwnd) = FindWindowW(w!("OmniTouch-OverlayWindow"), w!("R-TKO Overlay")) {
+                                    if let Ok(overlay_hwnd) = FindWindowW(w!("OmniTouch-OverlayWindow"), w!("OmniTouch Overlay")) {
                                         if IsWindow(overlay_hwnd).as_bool() {
-                                        let _ = ShowWindow(overlay_hwnd, SW_HIDE);
-                                        KillTimer(overlay_hwnd, 100);
+                                            let _ = ShowWindow(overlay_hwnd, SW_HIDE);
+                                            KillTimer(overlay_hwnd, 100);
+                                        }
                                     }
+                                    APP_STATE.with(|s| {
+                                        if let Ok(mut state) = s.try_borrow_mut() {
+                                            state.emergency_release_all_keys();
+                                            state.mode = ProgramMode::Menu;
+                                        }
+                                    });
                                 }
-                                APP_STATE.with(|s| {
-                                    if let Ok(mut state) = s.try_borrow_mut() {
-                                        state.mode = ProgramMode::Menu;
-                                    }
-                                });
-                            }
 
                             APP_STATE.with(|s| {
                                 if let Ok(state) = s.try_borrow() {
@@ -657,12 +780,14 @@ pub unsafe extern "system" fn main_wndproc(
                                 style, 20, 20, 80, 35, hwnd, HMENU(IDC_SETTINGS_BACK as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_back);
+                            enable_settings_touch_pan(h_back);
 
                             let h_title = CreateWindowExW(
                                 WINDOW_EX_STYLE::default(), WC_BUTTONW, w!("软件设置"),
                                 title_style, center_x - 60, 25, 120, 35, hwnd, HMENU(IDC_SETTINGS_TITLE as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_title);
+                            enable_settings_touch_pan(h_title);
 
                             let auto_str = if auto { w!("   ✅    开机自启") } else { w!("   ❌    开机自启") };
                             let h_auto = CreateWindowExW(
@@ -670,6 +795,7 @@ pub unsafe extern "system" fn main_wndproc(
                                 style, center_x - 160, 90, 320, 45, hwnd, HMENU(IDC_SETTINGS_AUTOSTART as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_auto);
+                            enable_settings_touch_pan(h_auto);
 
                             let osk_str = if osk { w!("   ✅    系统屏幕键盘") } else { w!("   ❌    系统屏幕键盘") };
                             let h_osk = CreateWindowExW(
@@ -677,6 +803,7 @@ pub unsafe extern "system" fn main_wndproc(
                                 style, center_x - 160, 150, 320, 45, hwnd, HMENU(IDC_SETTINGS_OSK as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_osk);
+                            enable_settings_touch_pan(h_osk);
 
                             let pad_str = if pad { w!("   ✅    虚拟 Xbox 手柄") } else { w!("   ❌    虚拟 Xbox 手柄") };
                             let h_gamepad = CreateWindowExW(
@@ -684,6 +811,7 @@ pub unsafe extern "system" fn main_wndproc(
                                 style, center_x - 160, 210, 320, 45, hwnd, HMENU(IDC_SETTINGS_GAMEPAD as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_gamepad);
+                            enable_settings_touch_pan(h_gamepad);
 
                             let tray_str = if tray { w!("   ✅    关闭最小化到托盘") } else { w!("   ❌    关闭最小化到托盘") };
                             let h_tray = CreateWindowExW(
@@ -691,12 +819,14 @@ pub unsafe extern "system" fn main_wndproc(
                                 style, center_x - 160, 270, 320, 45, hwnd, HMENU(IDC_SETTINGS_TRAY as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_tray);
+                            enable_settings_touch_pan(h_tray);
 
                             let h_about = CreateWindowExW(
                                 WINDOW_EX_STYLE::default(), WC_BUTTONW, w!("    关于 OmniTouch                                                            >"),
                                 style, center_x - 160, 330, 320, 45, hwnd, HMENU(IDC_SETTINGS_ABOUT as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_about);
+                            enable_settings_touch_pan(h_about);
                         }
 
                         // 处理设置面板内按钮和开关的点击交互。
@@ -783,36 +913,42 @@ pub unsafe extern "system" fn main_wndproc(
                                 style, 20, 20, 80, 35, hwnd, HMENU(IDC_ABOUT_BACK as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_back);
+                            enable_settings_touch_pan(h_back);
 
                             let h_title = CreateWindowExW(
                                 WINDOW_EX_STYLE::default(), WC_BUTTONW, w!("关于"),
                                 title_style, center_x - 60, 25, 120, 35, hwnd, HMENU(IDC_ABOUT_TITLE as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_title);
+                            enable_settings_touch_pan(h_title);
 
                             let h_appname = CreateWindowExW(
                                 WINDOW_EX_STYLE::default(), WC_BUTTONW, w!("   软件名称            OmniTouch 全能触控"),
                                 style, center_x - 160, 90, 320, 45, hwnd, HMENU(IDC_ABOUT_APPNAME as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_appname);
+                            enable_settings_touch_pan(h_appname);
 
                             let h_version = CreateWindowExW(
                                 WINDOW_EX_STYLE::default(), WC_BUTTONW, w!("   当前版本                                   v1.0.0"),
                                 style, center_x - 160, 150, 320, 45, hwnd, HMENU(IDC_ABOUT_VERSION as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_version);
+                            enable_settings_touch_pan(h_version);
 
                             let h_author = CreateWindowExW(
                                 WINDOW_EX_STYLE::default(), WC_BUTTONW, w!("   核心作者                               青冥日月"),
                                 style, center_x - 160, 210, 320, 45, hwnd, HMENU(IDC_ABOUT_AUTHOR as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_author);
+                            enable_settings_touch_pan(h_author);
 
                             let h_repo = CreateWindowExW(
                                 WINDOW_EX_STYLE::default(), WC_BUTTONW, w!("   开源代码                      前往 GitHub >"),
                                 style, center_x - 160, 270, 320, 45, hwnd, HMENU(IDC_ABOUT_REPO as isize as *mut std::ffi::c_void), instance, None,
                             ).unwrap();
                             crate::ui::apply_modern_font(h_repo);
+                            enable_settings_touch_pan(h_repo);
                         }
 
                         IDC_ABOUT_BACK => {
@@ -1136,9 +1272,10 @@ pub unsafe extern "system" fn child_wndproc(
                             });
 
                             crate::ui::CURRENT_MODE.store(3, Ordering::SeqCst);
-                            if let Ok(overlay_hwnd) = FindWindowW(w!("R-TKO-OverlayWindow"), w!("R-TKO Overlay")) {
+                            if let Ok(overlay_hwnd) = FindWindowW(w!("OmniTouch-OverlayWindow"), w!("OmniTouch Overlay")) {
                                 if IsWindow(overlay_hwnd).as_bool() {
                                     let _ = ShowWindow(overlay_hwnd, SW_SHOWNOACTIVATE);
+                                    keep_window_topmost(overlay_hwnd);
                                     let _ = InvalidateRect(overlay_hwnd, None, TRUE);
                                 }
                             }
@@ -1163,7 +1300,7 @@ pub unsafe extern "system" fn child_wndproc(
         WM_GETMINMAXINFO => {
             let mmi = &mut *(lparam.0 as *mut MINMAXINFO);
             mmi.ptMinTrackSize.x = 420;
-            mmi.ptMinTrackSize.y = 380;
+            mmi.ptMinTrackSize.y = 460;
             LRESULT(0)
         }
 
@@ -1270,7 +1407,7 @@ pub unsafe extern "system" fn child_wndproc(
                                                         state.load_config_by_index(state_idx);
                                                     }
                                                     
-                                                    if let Ok(overlay_hwnd) = FindWindowW(w!("R-TKO-OverlayWindow"), w!("R-TKO Overlay")) {
+                                                    if let Ok(overlay_hwnd) = FindWindowW(w!("OmniTouch-OverlayWindow"), w!("OmniTouch Overlay")) {
                                                         if IsWindow(overlay_hwnd).as_bool() {
                                                             crate::ui::render::force_redraw(overlay_hwnd, &mut state);
                                                         }
@@ -1403,7 +1540,7 @@ pub unsafe extern "system" fn child_wndproc(
                                         state.load_configs();
                                         
                                         // 强制将"空白状态"重绘到屏幕上
-                                        if let Ok(overlay_hwnd) = FindWindowW(w!("R-TKO-OverlayWindow"), w!("R-TKO Overlay")) {
+                                        if let Ok(overlay_hwnd) = FindWindowW(w!("OmniTouch-OverlayWindow"), w!("OmniTouch Overlay")) {
                                             if IsWindow(overlay_hwnd).as_bool() {
                                                 crate::ui::render::force_redraw(overlay_hwnd, &mut state);
                                             }
@@ -1483,7 +1620,7 @@ pub unsafe extern "system" fn child_wndproc(
 
                 if crate::ui::CURRENT_MODE.load(Ordering::SeqCst) == 3 {
                     crate::ui::CURRENT_MODE.store(0, Ordering::SeqCst);
-                    if let Ok(overlay_hwnd) = FindWindowW(w!("R-TKO-OverlayWindow"), w!("R-TKO Overlay")) {
+                    if let Ok(overlay_hwnd) = FindWindowW(w!("OmniTouch-OverlayWindow"), w!("OmniTouch Overlay")) {
                         if IsWindow(overlay_hwnd).as_bool() { let _ = ShowWindow(overlay_hwnd, SW_HIDE); }
                     }
                 }
@@ -1585,6 +1722,9 @@ pub unsafe extern "system" fn overlay_wndproc(
         }
         // 鼠标按下时交给统一事件处理器更新按键状态。
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+            if is_synthetic_touch_mouse_message() || is_injected_mouse_message() {
+                return LRESULT(0);
+            }
             let pt = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
             APP_STATE.with(|s| {
                 if let Ok(mut s) = s.try_borrow_mut() {
@@ -1596,8 +1736,7 @@ pub unsafe extern "system" fn overlay_wndproc(
         }
         // 鼠标移动时处理拖拽、摇杆和滑动触发逻辑。
         WM_MOUSEMOVE => {
-            // 防止模拟鼠标输入导致的无限死循环
-            if GetMessageExtraInfo().0 as usize == crate::input::handler::INJECTED_INPUT_SIGNATURE {
+            if is_synthetic_touch_mouse_message() || is_injected_mouse_message() {
                 return LRESULT(0);
             }
             let pt = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
@@ -1613,6 +1752,9 @@ pub unsafe extern "system" fn overlay_wndproc(
         }
         // 鼠标抬起时统一收尾并释放按键状态。
         WM_LBUTTONUP => {
+            if is_synthetic_touch_mouse_message() || is_injected_mouse_message() {
+                return LRESULT(0);
+            }
             let _ = ReleaseCapture();
             APP_STATE.with(|s| {
                 if let Ok(mut s) = s.try_borrow_mut() {
@@ -1652,6 +1794,7 @@ pub unsafe extern "system" fn overlay_wndproc(
         }
         WM_TIMER => {
             if wparam.0 == 100 {
+                keep_window_topmost(hwnd);
                 APP_STATE.with(|s| {
                     if let Ok(state) = s.try_borrow_mut() {
                         if state.mode == ProgramMode::Running {
@@ -1695,6 +1838,10 @@ pub unsafe extern "system" fn edit_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    const WM_POINTERDOWN: u32 = 0x0246;
+    const WM_POINTERUP: u32 = 0x0247;
+    const WM_POINTERUPDATE: u32 = 0x0245;
+
     match message {
         WM_CLOSE => {
             let sidebar_handle = GetPropW(window, w!("SidebarHwnd"));
@@ -1757,6 +1904,7 @@ pub unsafe extern "system" fn edit_wndproc(
             return LRESULT(hit);
         }
         WM_TIMER => {
+            keep_window_topmost(window);
             APP_STATE.with(|s| {
                 if let Ok(mut s) = s.try_borrow_mut() {
                     if s.osk_visible && s.osk_target_text.is_some() {
@@ -1766,7 +1914,52 @@ pub unsafe extern "system" fn edit_wndproc(
             });
             return LRESULT(0);
         }
+        WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
+            let pt = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
+            let mut close = false;
+            APP_STATE.with(|s| {
+                if let Ok(mut s) = s.try_borrow_mut() {
+                    if message == WM_POINTERDOWN {
+                        crate::core::event_handler::on_lbutton_down(&mut s, window, pt, false);
+                    } else if message == WM_POINTERUPDATE {
+                        let need_redraw = crate::core::event_handler::on_mouse_move(&mut s, pt);
+                        if need_redraw {
+                            crate::ui::render::force_redraw(window, &mut s);
+                        }
+                        return;
+                    } else {
+                        crate::core::event_handler::on_lbutton_up(&mut s);
+                    }
+
+                    if s.mode == ProgramMode::Menu || s.mode == ProgramMode::Paused {
+                        close = true;
+                        s.emergency_release_all_keys();
+                    } else {
+                        crate::ui::render::force_redraw(window, &mut s);
+                    }
+                }
+            });
+
+            if close {
+                crate::ui::CURRENT_MODE.store(0, std::sync::atomic::Ordering::SeqCst);
+
+                let sidebar_handle = GetPropW(window, w!("SidebarHwnd"));
+                if !sidebar_handle.is_invalid() {
+                    let sidebar_hwnd = HWND(sidebar_handle.0 as *mut _);
+                    if IsWindow(sidebar_hwnd).as_bool() { DestroyWindow(sidebar_hwnd); }
+                    RemovePropW(window, w!("SidebarHwnd"));
+                }
+
+                let main_hwnd = HWND(GetWindowLongPtrW(window, GWLP_USERDATA) as *mut _);
+                if IsWindow(main_hwnd).as_bool() { ShowWindow(main_hwnd, SW_SHOW); }
+                DestroyWindow(window);
+            }
+            return LRESULT(0);
+        }
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+            if is_synthetic_touch_mouse_message() || is_injected_mouse_message() {
+                return LRESULT(0);
+            }
             let pt = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
             let is_double_click = message == WM_LBUTTONDBLCLK;
             let mut close = false;
@@ -1800,6 +1993,9 @@ pub unsafe extern "system" fn edit_wndproc(
             return LRESULT(0);
         }
         WM_MOUSEMOVE => {
+            if is_synthetic_touch_mouse_message() || is_injected_mouse_message() {
+                return LRESULT(0);
+            }
             let pt = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
             APP_STATE.with(|s| {
                 if let Ok(mut s) = s.try_borrow_mut() {
@@ -1841,6 +2037,9 @@ pub unsafe extern "system" fn edit_wndproc(
             return LRESULT(0);
         }
         WM_LBUTTONUP => {
+            if is_synthetic_touch_mouse_message() || is_injected_mouse_message() {
+                return LRESULT(0);
+            }
             let mut close = false;
             APP_STATE.with(|s| {
                 if let Ok(mut s) = s.try_borrow_mut() {
