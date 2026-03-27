@@ -18,7 +18,7 @@ pub static MENU_BUTTONS: Lazy<Mutex<Vec<isize>>> = Lazy::new(|| Mutex::new(Vec::
 pub static MODERN_FONT: Lazy<Mutex<isize>> = Lazy::new(|| {
     unsafe {
         let h_font = CreateFontW(
-            -16, 0, 0, 0, 400, 0, 0, 0,
+            -16, 0, 0, 0, 500, 0, 0, 0,
             DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
             CLIP_DEFAULT_PRECIS.0 as u32, CLEARTYPE_QUALITY.0 as u32,
             VARIABLE_PITCH.0 as u32, w!("Microsoft YaHei UI"),

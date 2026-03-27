@@ -27,9 +27,6 @@ use windows::{
 /// 初始化 Windows 运行环境并进入主消息循环。
 fn main() -> Result<()> {
     unsafe {
-        // 尽早启用每显示器 DPI 感知，避免后续窗口尺寸计算失真。
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-
         // 初始化当前线程的 COM 环境，供窗口与系统组件使用。
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 

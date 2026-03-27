@@ -718,24 +718,24 @@ pub unsafe fn enter_edit_mode(
     let tree_hwnd = CreateWindowExW(
         WINDOW_EX_STYLE::default(), w!("SysTreeView32"), None,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((TVS_HASBUTTONS | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_TRACKSELECT | TVS_LINESATROOT) as u32),
-        10, 10, 260, 520,
+        20, 20, 320, 600,
         sidebar_hwnd, HMENU(3002 as *mut _), instance, None,
     ).unwrap();
 
     let _ = SetWindowTheme(tree_hwnd, w!("Explorer"), None);
     SendMessageW(tree_hwnd, TVM_SETEXTENDEDSTYLE, WPARAM(0x0004), LPARAM(0x0004));
-    SendMessageW(tree_hwnd, TVM_SETITEMHEIGHT, WPARAM(30), LPARAM(0));
+    SendMessageW(tree_hwnd, TVM_SETITEMHEIGHT, WPARAM(55), LPARAM(0));
     apply_modern_font(tree_hwnd);
 
-    let btn_y = 550;
-    let btn_save = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("Button"), w!("保存"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32), 10, btn_y, 80, 40, sidebar_hwnd, HMENU(5002 as *mut _), instance, None).unwrap();
-    let btn_exit = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("Button"), w!("退出"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32), 100, btn_y, 80, 40, sidebar_hwnd, HMENU(5003 as *mut _), instance, None).unwrap();
+    let btn_y = 650;
+    let btn_save = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("Button"), w!("保存"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32), 20, btn_y, 120, 50, sidebar_hwnd, HMENU(5002 as *mut _), instance, None).unwrap();
+    let btn_exit = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("Button"), w!("退出"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32), 160, btn_y, 120, 50, sidebar_hwnd, HMENU(5003 as *mut _), instance, None).unwrap();
     apply_modern_font(btn_save); apply_modern_font(btn_exit);
 
     let right_pane = CreateWindowExW(
         WINDOW_EX_STYLE::default(), w!("Static"), None,
         WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
-        280, 10, 490, 590,
+        360, 20, 490, 700,
         sidebar_hwnd, HMENU(6001 as *mut _), instance, None,
     ).unwrap();
     SetPropW(sidebar_hwnd, w!("RightPane"), HANDLE(right_pane.0 as _));
